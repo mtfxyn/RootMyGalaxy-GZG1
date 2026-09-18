@@ -11,8 +11,12 @@ android {
         applicationId = "dev.busung.s25uroot"
         minSdk = 33
         targetSdk = 36
-        versionCode = 36
-        versionName = "0.2.30"
+        // Bumped for the GZG1 single-device build: versionCode must exceed the
+        // installed upstream release so `adb install -r` replaces it, and the
+        // -gzg1 suffix keeps the two builds apart in the UI. Same committed
+        // release keystore, so the signature still matches.
+        versionCode = 37
+        versionName = "0.2.30-gzg1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {

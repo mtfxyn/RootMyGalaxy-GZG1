@@ -39,6 +39,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # The bundled payloads ARE the exploit. A silently corrupted or
+      # swapped asset would still build a valid APK and only fail on device,
+      # so pin the exact bytes here. These hashes are the ones validated on
+      # RFCW71E5P6K (see LocalFeed.kt); changing a binary means changing them.
+      - name: Verify bundled GZG1 payload checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd app/src/main
+          md5sum -c <<'SUMS'
+          0187e5165b35d1c6275a341d2cbf82fc  assets/gzg1/cve-2026-43499-app.so
+          f171c73ca3f4d88e891834f77fab2298  assets/gzg1/cve-2026-43499-root
+          a7015ddd8cb0fd64903b61993f8b37fd  assets/gzg1/ksud-f946b-F946BXXS7GZG1-kdp
+          0187e5165b35d1c6275a341d2cbf82fc  jniLibs/arm64-v8a/libcve43499app.so
+          0187e5165b35d1c6275a341d2cbf82fc  jniLibs/arm64-v8a/libcve43499app-f946b-F946BXXS7GZG1.so
+          f171c73ca3f4d88e891834f77fab2298  jniLibs/arm64-v8a/libcve43499root.so
+          SUMS
+
       - name: Build debug + release APKs
         run: ./gradlew assembleDebug assembleRelease --no-daemon
 

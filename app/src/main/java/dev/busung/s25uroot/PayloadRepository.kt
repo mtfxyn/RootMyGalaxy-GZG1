@@ -2,12 +2,8 @@ package dev.busung.s25uroot
 
 import android.content.Context
 import android.system.Os
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import org.json.JSONObject
 
 data class VerifiedPayloads(
     val profile: TargetProfile,
@@ -18,12 +14,13 @@ data class VerifiedPayloads(
 
 class PayloadRepository(private val context: Context) {
     /**
-     * Resolve against the live feed, retrying the full commit+manifest
-     * fetch up to [attempts] times. Every attempt failure is observable
-     * (logged via onRetry); after the last attempt this ABORTS — never a
-     * cached-manifest fallback. The cache once let a stale ksud ship with
-     * fresh exploit binaries (sizes validated against an outdated
-     * manifest), crashing the rebased KernelSU stack on device.
+     * Resolve the built-in profile against [snapshot].
+     *
+     * Nothing here touches the network, so no failure is transient and no
+     * retry helps: an unmatched device aborts at once with repo_no_profile
+     * instead of being handed a payload built for different offsets.
+     * [attempts] and [onRetry] survive only so existing callers — and their
+     * "attempt N failed" diagnostics — keep compiling.
      */
     fun resolveTargetFresh(
         snapshot: DeviceSnapshot,
@@ -31,37 +28,16 @@ class PayloadRepository(private val context: Context) {
         onRetry: (attempt: Int, error: Throwable) -> Unit = { _, _ -> },
     ): TargetProfile {
         require(attempts > 0)
-        var last: Throwable? = null
-        repeat(attempts) { index ->
-            try {
-                val profile = loadTargets().firstOrNull { it.matches(snapshot) }
-                if (profile != null) return profile
-                error(context.getString(R.string.repo_no_profile))
-            } catch (e: Throwable) {
-                last = e
-                if (index < attempts - 1) {
-                    onRetry(index + 1, e)
-                    Thread.sleep(RETRY_BACKOFF_MS * (index + 1))
-                }
-            }
-        }
-        throw IllegalStateException(
-            context.getString(R.string.repo_feed_unreachable, attempts),
-            last,
-        )
+        return loadTargets().firstOrNull { it.matches(snapshot) }
+            ?: error(context.getString(R.string.repo_no_profile))
     }
 
-    fun loadTargets(): List<TargetProfile> {
-        val commit = resolveMainCommit()
-        val manifestBytes = downloadBytes(rawUrl(commit, "support/targets-v3.json"), MAX_MANIFEST_BYTES)
-        // Persist for diagnostics cache (see lastCachedTargets()).
-        runCatching { File(context.filesDir, MANIFEST_CACHE).writeBytes(manifestBytes) }
-        return SupportManifest.parse(manifestBytes).targets.map { profile -> profile.copy(
-            exploit = profile.exploit.copy(url = pinArtifactUrl(profile.exploit.url, commit)),
-            kernelSu = profile.kernelSu.copy(url = pinArtifactUrl(profile.kernelSu.url, commit)),
-            rootHelper = profile.rootHelper?.copy(url = pinArtifactUrl(profile.rootHelper.url, commit)),
-        ) }
-    }
+    /**
+     * The built-in feed — see [LocalFeed] for why the remote one was removed
+     * rather than re-pointed at a mirror. This build never resolves a target
+     * over the network.
+     */
+    fun loadTargets(): List<TargetProfile> = LocalFeed.TARGETS
 
     fun resolveTarget(snapshot: DeviceSnapshot): TargetProfile = resolveTargetFresh(snapshot)
 
@@ -118,14 +94,35 @@ class PayloadRepository(private val context: Context) {
     ): File {
         onProgress(context.getString(R.string.repo_downloading, label))
         val temporary = File(destination.parentFile, "${destination.name}.part")
-        val connection = open(artifact.url)
-        require(connection.contentLengthLong == -1L || connection.contentLengthLong == artifact.size) {
-            context.getString(R.string.repo_size_mismatch, label)
+        val total = extractAsset(artifact, temporary, label)
+        require(total == artifact.size) { context.getString(R.string.repo_incomplete, label) }
+        if (destination.exists()) destination.delete()
+        require(temporary.renameTo(destination)) {
+            context.getString(R.string.repo_finalize_failed, label)
         }
-        var total = 0L
-        connection.inputStream.use { input ->
+        onProgress(context.getString(R.string.repo_verified, label))
+        return destination
+    }
+
+    /**
+     * Copy a payload that ships inside the APK. Same size discipline as the
+     * network path it replaces: the asset must be exactly
+     * [RemoteArtifact.size] bytes, so an asset that drifts from the profile
+     * aborts the run instead of staging a half-updated stack.
+     */
+    private fun extractAsset(
+        artifact: RemoteArtifact,
+        temporary: File,
+        label: String,
+    ): Long {
+        require(artifact.url.startsWith(LocalFeed.ASSET_SCHEME)) {
+            context.getString(R.string.repo_url_invalid)
+        }
+        val path = artifact.url.removePrefix(LocalFeed.ASSET_SCHEME)
+        return context.assets.open(path).use { input ->
             FileOutputStream(temporary).use { output ->
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var total = 0L
                 while (true) {
                     val count = input.read(buffer)
                     if (count < 0) break
@@ -136,80 +133,17 @@ class PayloadRepository(private val context: Context) {
                     output.write(buffer, 0, count)
                 }
                 output.fd.sync()
+                total
             }
         }
-        connection.disconnect()
-        require(total == artifact.size) { context.getString(R.string.repo_incomplete, label) }
-        if (destination.exists()) destination.delete()
-        require(temporary.renameTo(destination)) {
-            context.getString(R.string.repo_finalize_failed, label)
-        }
-        onProgress(context.getString(R.string.repo_verified, label))
-        return destination
     }
-
-    private fun resolveMainCommit(): String {
-        val response = downloadBytes(COMMIT_API_URL, MAX_COMMIT_RESPONSE_BYTES)
-        val commit = JSONObject(response.toString(Charsets.UTF_8))
-            .getJSONObject("object")
-            .getString("sha")
-        require(commit.matches(Regex("[0-9a-f]{40}"))) { context.getString(R.string.repo_commit_invalid) }
-        return commit
-    }
-
-    private fun rawUrl(commit: String, path: String) = "$RAW_REPOSITORY/$commit/$path"
 
     private fun remoteFileName(url: String) = url.substringAfterLast('/')
 
-    private fun pinArtifactUrl(url: String, commit: String): String {
-        require(url.startsWith(MUTABLE_RAW_PREFIX)) { context.getString(R.string.repo_url_invalid) }
-        return "$RAW_REPOSITORY/$commit/${url.removePrefix(MUTABLE_RAW_PREFIX)}"
-    }
-
-    private fun downloadBytes(url: String, maximum: Int): ByteArray {
-        val connection = open(url)
-        val bytes = connection.inputStream.use { input ->
-            val output = ByteArrayOutputStream()
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                require(output.size() + count <= maximum) {
-                    context.getString(R.string.repo_response_too_large)
-                }
-                output.write(buffer, 0, count)
-            }
-            output.toByteArray()
-        }
-        connection.disconnect()
-        return bytes
-    }
-
-    private fun open(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 60_000
-            // Never follow redirects: a 302 (captive portal, repo transfer)
-            // would silently re-point a commit-pinned URL at an arbitrary
-            // host, leaving size equality as the only integrity check.
-            instanceFollowRedirects = false
-            setRequestProperty("User-Agent", "S25URoot/${BuildConfig.VERSION_NAME}")
-            connect()
-            require(responseCode == HttpURLConnection.HTTP_OK) { "HTTP $responseCode" }
-        }
-
     companion object {
-        private const val COMMIT_API_URL =
-            "https://api.github.com/repos/HyperRamzey/Root-My-Galaxy-Payloads/git/ref/heads/main"
-        private const val RAW_REPOSITORY =
-            "https://raw.githubusercontent.com/HyperRamzey/Root-My-Galaxy-Payloads"
-        private const val MUTABLE_RAW_PREFIX = "$RAW_REPOSITORY/main/"
-        private const val MANIFEST_PATH = "support/targets-v3.json"
+        /** Diagnostics cache written by older feed-based builds. */
         private const val MANIFEST_CACHE = "payloads/targets-cache.json"
-        private const val MAX_COMMIT_RESPONSE_BYTES = 16 * 1024
-        private const val MAX_MANIFEST_BYTES = 1024 * 1024
-        /** Live-feed fetch attempts before aborting (no cache fallback). */
+        /** Only the default for [resolveTargetFresh]'s signature; see there. */
         private const val FEED_FETCH_ATTEMPTS = 3
-        private const val RETRY_BACKOFF_MS = 3_000L
     }
 }
