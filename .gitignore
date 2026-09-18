@@ -7,3 +7,6 @@ local.properties
 captures/
 *.iml
 device-logs/
+
+# CI artifact downloaded by hand for local install/verification.
+/app-release.apk

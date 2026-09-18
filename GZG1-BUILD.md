@@ -38,8 +38,8 @@ ashmem use — which is exactly what happened on 2026-09-16.
 | `app/src/main/java/.../PayloadRepository.kt` | `loadTargets()` returns `LocalFeed.TARGETS`; artifacts are copied out of the APK's assets instead of fetched. The commit/manifest fetch, redirect-hardened HTTP client and the dead feed-retry ladder are gone. |
 | `app/src/main/assets/gzg1/` | **New.** The three payloads. |
 | `app/src/main/jniLibs/arm64-v8a/` | `libcve43499app.so` and `libcve43499root.so` replaced with the GZG1 builds; added `libcve43499app-f946b-F946BXXS7GZG1.so` for the per-profile lookup in `ExploitStaging`. |
-| `app/build.gradle.kts` | `versionCode 37`, `versionName 0.2.30-gzg1`. Same committed release keystore, so the signature is unchanged and `adb install -r` replaces the upstream build. |
-| `.github/workflows/ci.yml` | Added a step that pins the md5 of every bundled binary before the build. |
+| `app/build.gradle.kts` | `versionCode 37`, `versionName 0.2.30-gzg1`. Same committed release keystore, so the signature is unchanged and `adb install -r` replaces the upstream build. Also sets `jniLibs.keepDebugSymbols` for the two payload libs — see below. |
+| `.github/workflows/ci.yml` | Two verification steps: one pins the md5 of every bundled binary *before* the build, one opens the built APK and hashes the *packaged* copies. |
 
 ## Bundled payloads
 
@@ -71,6 +71,16 @@ against the size in `LocalFeed` before staging, and `RootOnBootService` skips
 its refresh only when the cached copy matches. Rebuilding a binary means
 updating the asset, the size in `LocalFeed.kt`, and the md5 in `ci.yml`
 together.
+
+**AGP strips prebuilt jniLibs.** The first build placed the 136392-byte
+exploit in the APK as 113936 bytes and the 44520-byte helper as 37256 —
+`StripDebugSymbolsTask` covers the whole merged jniLibs set, not just libs it
+built itself. Stripping only removes non-allocated sections so the loaded
+image is unchanged, and the normal staging path uses the `assets/` copies
+(never rewritten) anyway. But the jniLibs copies are the fallback used when
+`/data/local/tmp` is unwritable, and they are supposed to be the same bytes
+validated on device, so `keepDebugSymbols` holds them byte-exact and the CI
+step that hashes APK contents can actually mean something.
 
 ## What was verified on device
 

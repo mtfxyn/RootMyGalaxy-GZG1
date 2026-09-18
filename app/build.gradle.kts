@@ -78,6 +78,15 @@ android {
 
     packaging {
         jniLibs.useLegacyPackaging = true
+        // AGP strips every native lib in the merged jniLibs set, prebuilt
+        // ones included: the 136392-byte exploit went into the first APK as
+        // 113936 bytes and the 44520-byte helper as 37256. Stripping only
+        // drops non-allocated sections, so the loaded image is unchanged —
+        // but these two are the exploit's bundled fallback binaries, meant to
+        // be the same bytes validated on device, and the post-build CI step
+        // hashes what is actually packaged. Keep them byte-exact so that
+        // check means something.
+        jniLibs.keepDebugSymbols += "**/libcve43499*.so"
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 }

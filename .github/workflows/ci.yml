@@ -60,6 +60,56 @@ jobs:
       - name: Build debug + release APKs
         run: ./gradlew assembleDebug assembleRelease --no-daemon
 
+      # The step above pins the SOURCES. This one pins what actually ships, by
+      # opening the built APK and hashing the packaged copies. AGP rewrites
+      # native libs on the way in, so a source-only check cannot catch a
+      # payload that changed between merge and packaging.
+      - name: Verify payloads inside the built APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile, hashlib, glob, sys
+
+          EXPECT = {
+              "assets/gzg1/cve-2026-43499-app.so":
+                  ("0187e5165b35d1c6275a341d2cbf82fc", 136392),
+              "assets/gzg1/cve-2026-43499-root":
+                  ("f171c73ca3f4d88e891834f77fab2298", 44520),
+              "assets/gzg1/ksud-f946b-F946BXXS7GZG1-kdp":
+                  ("a7015ddd8cb0fd64903b61993f8b37fd", 5465448),
+              "lib/arm64-v8a/libcve43499app.so":
+                  ("0187e5165b35d1c6275a341d2cbf82fc", 136392),
+              "lib/arm64-v8a/libcve43499app-f946b-F946BXXS7GZG1.so":
+                  ("0187e5165b35d1c6275a341d2cbf82fc", 136392),
+              "lib/arm64-v8a/libcve43499root.so":
+                  ("f171c73ca3f4d88e891834f77fab2298", 44520),
+          }
+
+          apks = glob.glob("app/build/outputs/apk/release/*.apk")
+          if len(apks) != 1:
+              sys.exit(f"expected exactly one release APK, found {apks}")
+
+          archive = zipfile.ZipFile(apks[0])
+          bad = 0
+          for path, (want, size) in EXPECT.items():
+              try:
+                  data = archive.read(path)
+              except KeyError:
+                  print(f"MISSING  {path}")
+                  bad += 1
+                  continue
+              got = hashlib.md5(data).hexdigest()
+              if got != want or len(data) != size:
+                  print(f"MISMATCH {path}: {len(data)} bytes {got}, want {size} {want}")
+                  bad += 1
+              else:
+                  print(f"OK       {path}")
+          if bad:
+              sys.exit(f"{bad} payload entries failed verification in {apks[0]}")
+          print(f"all {len(EXPECT)} payload entries verified in {apks[0]}")
+          PY
+
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
